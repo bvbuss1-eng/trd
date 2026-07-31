@@ -209,6 +209,14 @@ def cmd_structure(args) -> int:
     return 0
 
 
+def cmd_patterns(args) -> int:
+    from .patterns import patterns_report
+    client = BinanceData(market=args.market)
+    df = enrich(client.klines_range(args.symbol, args.interval, args.days))
+    print(patterns_report(df, args.symbol, args.interval, horizon=args.horizon))
+    return 0
+
+
 def cmd_chart(args) -> int:
     client = BinanceData(market=args.market)
     df = enrich(client.klines_range(args.symbol, args.interval, args.days))
@@ -288,6 +296,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="bars to measure the outcome after each event (default 12)")
     _add_common(p)
     p.set_defaults(func=cmd_structure)
+
+    p = sub.add_parser("patterns", help="Pattern Lab: measure the classic "
+                       "pattern catalog with significance stats")
+    p.add_argument("symbol")
+    p.add_argument("--horizon", type=int, default=12,
+                   help="bars to measure the outcome after each event (default 12)")
+    _add_common(p)
+    p.set_defaults(func=cmd_patterns)
 
     p = sub.add_parser("chart", help="render a chart PNG")
     p.add_argument("symbol")

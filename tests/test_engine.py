@@ -241,6 +241,13 @@ def main() -> int:
                                  "REGIME SHARE", "PAY FOR ITSELF")))
     check("structure report has sweep events", "events" in rep)
 
+    print("== pattern lab ==")
+    from analyst.patterns import patterns_report
+    prep = patterns_report(mr_df, "SYNTH", "5m")
+    check("pattern lab renders", "PATTERN LAB" in prep and "DAILY STREAKS" in prep)
+    check("pattern lab finds VWAP reversion on OU data",
+          "stretched 2 ATR" in prep)
+
     print("== risk sizing ==")
     s = position_size(500, 1.0, entry=100.0, stop=99.0, max_leverage=10)
     check("sizing math", "5.00" in s["risk per trade"] and "1.0x" in s["leverage needed"], str(s))
