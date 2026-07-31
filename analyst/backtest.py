@@ -170,11 +170,12 @@ def run_backtest(df: pd.DataFrame, htf: pd.DataFrame, params,
         entry_idx = i + 1                        # fill on next candle open
         fill = float(df["open"].iloc[entry_idx])
         risk = abs(sig.entry - sig.stop)
-        # re-anchor stop/target to the actual fill, keeping the same distances
+        # re-anchor stop/target to the actual fill, keeping the same distances;
+        # sig.rr allows per-signal geometry (e.g. dynamic VWAP targets)
         if sig.direction == "LONG":
-            stop, target = fill - risk, fill + risk * params.rr
+            stop, target = fill - risk, fill + risk * sig.rr
         else:
-            stop, target = fill + risk, fill - risk * params.rr
+            stop, target = fill + risk, fill - risk * sig.rr
         exit_idx, exit_price, outcome = _simulate_exit(
             df, entry_idx, sig.direction, fill, stop, target, max_hold)
         pnl = (exit_price - fill) if sig.direction == "LONG" else (fill - exit_price)

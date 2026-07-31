@@ -21,6 +21,8 @@ import sys
 from .backtest import grid_search, run_backtest
 from .charting import plot_chart
 from .data import BinanceData, BinanceError
+from .fade import (FadeParams, evaluate_fade, grid_search_fade,
+                   latest_fade_signal)
 from .indicators import enrich
 from .meanrev import (MeanRevParams, evaluate_meanrev, grid_search_meanrev,
                       latest_meanrev_signal)
@@ -32,6 +34,13 @@ from .sweep import (SweepParams, evaluate_sweep, grid_search_sweep,
 
 def _strategy_from_args(args):
     """Returns (params, evaluate_fn, latest_fn, max_hold) for the chosen strategy."""
+    if args.strategy == "fade":
+        params = FadeParams(stretch_atr=args.stretch_atr, tp_frac=args.tp_frac,
+                            confluence_min=args.confluence_min, hours=args.hours,
+                            stop_pad_atr=args.stop_pad_atr,
+                            allow_longs=args.allow_longs,
+                            max_hold=args.max_hold or 12)
+        return params, evaluate_fade, latest_fade_signal, params.max_hold
     if args.strategy == "sweep":
         params = SweepParams(rr=args.rr, hours=args.hours,
                              stop_pad_atr=args.stop_pad_atr,
@@ -161,7 +170,15 @@ def cmd_backtest(args) -> int:
     if args.optimize:
         print(f"Grid search on {args.symbol} {args.interval}, {args.days} days "
               f"({args.strategy})…\n")
-        if args.strategy == "sweep":
+        if args.strategy == "fade":
+            rows = grid_search_fade(df, htf_df, args.symbol, args.interval,
+                                    fee_pct=args.fee_pct, slippage_bps=args.slippage_bps)
+            for p, r in rows[:12]:
+                print(f"  stretch={p.stretch_atr:<4} tp={p.tp_frac:<5} "
+                      f"confl={p.confluence_min} -> {r.n:>3} trades, "
+                      f"{r.win_rate:5.1f}% win, {r.expectancy_r:+.3f} R/trade, "
+                      f"total {sum(t.r_multiple for t in r.trades):+.1f} R")
+        elif args.strategy == "sweep":
             rows = grid_search_sweep(df, htf_df, args.symbol, args.interval,
                                      fee_pct=args.fee_pct, slippage_bps=args.slippage_bps)
             for p, r in rows[:12]:
@@ -229,10 +246,19 @@ def cmd_chart(args) -> int:
 
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--strategy", default="pullback",
-                   choices=["pullback", "meanrev", "sweep"],
+                   choices=["pullback", "meanrev", "sweep", "fade"],
                    help="pullback = trend-following 1:2 RR; "
                         "meanrev = high-win-rate mean reversion (RR < 1); "
-                        "sweep = liquidity-sweep reversal (tight stop, session-filtered)")
+                        "sweep = liquidity-sweep reversal (tight stop, session-filtered); "
+                        "fade = VWAP-stretch fade (Pattern Lab composite)")
+    p.add_argument("--stretch-atr", type=float, default=2.0,
+                   help="[fade] setup when |close-VWAP| >= this many ATRs")
+    p.add_argument("--tp-frac", type=float, default=0.75,
+                   help="[fade] target this fraction of the way back to VWAP")
+    p.add_argument("--confluence-min", type=int, default=1,
+                   help="[fade] required confluences (sweep/streak/wick, 0-3)")
+    p.add_argument("--allow-longs", action="store_true",
+                   help="[fade] enable the long side (failed the 90d exam; opt-in)")
     p.add_argument("--tp-atr", type=float, default=1.2,
                    help="[meanrev] take-profit distance in ATRs")
     p.add_argument("--sl-atr", type=float, default=2.0,

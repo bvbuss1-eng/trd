@@ -241,6 +241,39 @@ def main() -> int:
                                  "REGIME SHARE", "PAY FOR ITSELF")))
     check("structure report has sweep events", "events" in rep)
 
+    print("== vwap-fade strategy ==")
+    from analyst.fade import FadeParams, evaluate_fade
+    fd_params = FadeParams(stretch_atr=1.5, allow_longs=True)
+    fd = run_backtest(mr_df, mr_htf, fd_params, "SYNTH", "5m",
+                      evaluate_fn=evaluate_fade, max_hold=fd_params.max_hold)
+    check("fade produces trades on ranging data", fd.n >= 5, f"n={fd.n}")
+    if fd.trades:
+        t0 = fd.trades[0]
+        ratio = abs(t0.target - t0.entry) / abs(t0.entry - t0.stop)
+        check("fade uses per-signal rr in backtest",
+              0.5 < ratio < 10, f"ratio={ratio:.3f}")
+        check("fade rr respects min_rr", ratio >= fd_params.min_rr - 1e-6,
+              f"ratio={ratio:.3f}")
+    fd_short_only = FadeParams(stretch_atr=1.5, allow_longs=False)
+    so = run_backtest(mr_df, mr_htf, fd_short_only, "SYNTH", "5m",
+                      evaluate_fn=evaluate_fade, max_hold=12)
+    check("fade default is short-only",
+          all(t.direction == "SHORT" for t in so.trades), "found a LONG")
+    fd_sig, i_fd = None, None
+    for i in range(len(mr_df) - 2, 100, -1):
+        fd_sig = evaluate_fade(mr_df, mr_htf, i, fd_params, "SYNTH", "5m")
+        if fd_sig:
+            i_fd = i
+            break
+    check("fade finds a signal in history", fd_sig is not None)
+    if fd_sig:
+        trunc = evaluate_fade(mr_df.iloc[: i_fd + 1], mr_htf, i_fd,
+                              fd_params, "SYNTH", "5m")
+        check("fade no lookahead",
+              trunc is not None and trunc.entry == fd_sig.entry
+              and trunc.stop == fd_sig.stop and trunc.rr == fd_sig.rr)
+    print(fd.report())
+
     print("== pattern lab ==")
     from analyst.patterns import patterns_report
     prep = patterns_report(mr_df, "SYNTH", "5m")

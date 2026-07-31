@@ -57,8 +57,8 @@ def pattern_table(df: pd.DataFrame, horizon: int = 12) -> pd.DataFrame:
     rows.append(_stats("prior-day HIGH touch & hold", -fwd[m],
                        "rejection short off yesterday's high"))
 
-    # ---- round-number levels (grid auto-scaled to price magnitude)
-    grid = 10 ** (int(np.floor(np.log10(float(close.median())))) - 2)
+    # ---- round-number levels (grid ~1% of price, snapped to a power of ten)
+    grid = 10 ** int(round(np.log10(float(close.median()) * 0.01)))
     lvl_dn = (o / grid).apply(np.floor) * grid
     lvl_up = (o / grid).apply(np.ceil) * grid
     m = (lo <= lvl_dn) & (close > lvl_dn) & (o > lvl_dn)
