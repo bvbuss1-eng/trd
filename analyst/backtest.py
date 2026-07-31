@@ -17,6 +17,9 @@ import pandas as pd
 
 from .strategy import StrategyParams, evaluate
 
+# Any params object with an `rr` attribute and a `to_dict()` works here
+# (StrategyParams, meanrev.MeanRevParams, ...).
+
 
 @dataclass
 class Trade:
@@ -37,7 +40,7 @@ class Trade:
 @dataclass
 class BacktestResult:
     trades: list[Trade] = field(default_factory=list)
-    params: StrategyParams | None = None
+    params: object | None = None
     symbol: str = ""
     interval: str = ""
     candles: int = 0
@@ -51,7 +54,12 @@ class BacktestResult:
         return sum(1 for t in self.trades if t.outcome == "win")
 
     @property
+    def time_exits(self) -> int:
+        return sum(1 for t in self.trades if t.outcome == "time")
+
+    @property
     def win_rate(self) -> float:
+        """Wins over ALL trades — time-stop exits count against the win rate."""
         return self.wins / self.n * 100 if self.n else 0.0
 
     @property
@@ -95,7 +103,8 @@ class BacktestResult:
         shorts = [t for t in self.trades if t.direction == "SHORT"]
         lines += [
             f"  Trades          : {self.n}  (long {len(longs)} / short {len(shorts)})",
-            f"  Win rate        : {self.win_rate:.1f}%  ({self.wins}W / {self.n - self.wins}L)",
+            f"  Win rate        : {self.win_rate:.1f}%  ({self.wins}W / "
+            f"{self.n - self.wins - self.time_exits}L / {self.time_exits} time-outs)",
             f"  Expectancy      : {self.expectancy_r:+.3f} R per trade (net of fees)",
             f"  Profit factor   : {self.profit_factor:.2f}",
             f"  Total           : {sum(t.r_multiple for t in self.trades):+.2f} R",
@@ -139,16 +148,22 @@ def _simulate_exit(df: pd.DataFrame, entry_idx: int, direction: str,
     return last, float(df["close"].iloc[last]), "time"
 
 
-def run_backtest(df: pd.DataFrame, htf: pd.DataFrame, params: StrategyParams,
+def run_backtest(df: pd.DataFrame, htf: pd.DataFrame, params,
                  symbol: str, interval: str,
                  fee_pct: float = 0.05, slippage_bps: float = 2.0,
-                 max_hold: int = 48) -> BacktestResult:
-    """df/htf must already be indicator-enriched. Fees/slippage per side."""
+                 max_hold: int = 48, evaluate_fn=None) -> BacktestResult:
+    """df/htf must already be indicator-enriched. Fees/slippage per side.
+
+    evaluate_fn(df, htf, i, params, symbol, interval) -> Signal | None
+    defaults to the trend-pullback strategy; pass meanrev.evaluate_meanrev
+    (with MeanRevParams) to test the mean-reversion strategy instead.
+    """
+    evaluate_fn = evaluate_fn or evaluate
     result = BacktestResult(params=params, symbol=symbol, interval=interval, candles=len(df))
     cost_r_frac = (fee_pct / 100 * 2) + (slippage_bps / 10_000 * 2)  # fraction of notional
     i = 30
     while i < len(df) - 1:
-        sig = evaluate(df, htf, i, params, symbol, interval)
+        sig = evaluate_fn(df, htf, i, params, symbol, interval)
         if sig is None:
             i += 1
             continue

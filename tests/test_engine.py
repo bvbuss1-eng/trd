@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from analyst.backtest import BacktestResult, Trade, _simulate_exit, run_backtest  # noqa: E402
 from analyst.charting import plot_chart  # noqa: E402
 from analyst.indicators import enrich  # noqa: E402
+from analyst.meanrev import (MeanRevParams, evaluate_meanrev,  # noqa: E402
+                             latest_meanrev_signal)
 from analyst.risk import position_size  # noqa: E402
 from analyst.strategy import StrategyParams, latest_signal  # noqa: E402
 
@@ -49,6 +51,29 @@ def synthetic_ohlcv(n: int = 2000, interval_min: int = 5, trend: float = 0.00012
     hi = np.maximum(o, close) * (1 + spread)
     lo = np.minimum(o, close) * (1 - spread)
     vol = np.abs(rng.normal(100, 35, n)) * (1 + 4 * np.abs(logret) / 0.002)
+    df = pd.DataFrame({"open": o, "high": hi, "low": lo, "close": close,
+                       "volume": vol}, index=idx)
+    df["close_time"] = (idx.view("int64") // 10**6) + interval_min * 60_000 - 1
+    return df
+
+
+def synthetic_meanrev_ohlcv(n: int = 4000, interval_min: int = 5,
+                            seed: int = 11) -> pd.DataFrame:
+    """Ornstein-Uhlenbeck (mean-reverting) log-price — a ranging market."""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2026-01-01", periods=n, freq=f"{interval_min}min", tz="UTC")
+    theta, sigma = 0.06, 0.0028
+    x = np.zeros(n)
+    for k in range(1, n):
+        x[k] = x[k - 1] - theta * x[k - 1] + rng.normal(0, sigma)
+    close = 50_000 * np.exp(x)
+    o = np.roll(close, 1) * (1 + rng.normal(0, 0.0004, n))
+    o[0] = close[0]
+    spread = np.abs(rng.normal(0, 0.0012, n))
+    hi = np.maximum(o, close) * (1 + spread)
+    lo = np.minimum(o, close) * (1 - spread)
+    ret = np.abs(np.diff(np.log(close), prepend=0))
+    vol = np.abs(rng.normal(100, 35, n)) * (1 + 4 * ret / 0.002)
     df = pd.DataFrame({"open": o, "high": hi, "low": lo, "close": close,
                        "volume": vol}, index=idx)
     df["close_time"] = (idx.view("int64") // 10**6) + interval_min * 60_000 - 1
@@ -115,6 +140,43 @@ def main() -> int:
               all(t.r_multiple > params.rr * 0.5 for t in wins),
               str([round(t.r_multiple, 2) for t in wins[:5]]))
     print(result.report())
+
+    print("== mean-reversion strategy (synthetic ranging market) ==")
+    mr_df = enrich(synthetic_meanrev_ohlcv())
+    mr_htf = enrich(resample_htf(synthetic_meanrev_ohlcv()))
+    mr_params = MeanRevParams()
+    mr = run_backtest(mr_df, mr_htf, mr_params, "SYNTH", "5m",
+                      evaluate_fn=evaluate_meanrev, max_hold=mr_params.max_hold)
+    check("meanrev produces trades", mr.n >= 15, f"n={mr.n}")
+    check("meanrev rr < 1 by construction", mr_params.rr < 1.0)
+    check("meanrev win rate >= 60% on mean-reverting data",
+          mr.win_rate >= 60.0, f"win_rate={mr.win_rate:.1f}")
+    check("meanrev expectancy positive on mean-reverting data",
+          mr.expectancy_r > 0, f"exp={mr.expectancy_r:+.3f} R")
+    if mr.trades:
+        t0 = mr.trades[0]
+        ratio = abs(t0.target - t0.entry) / abs(t0.entry - t0.stop)
+        check("meanrev tp/sl geometry",
+              math.isclose(ratio, mr_params.rr, rel_tol=1e-6), f"ratio={ratio:.3f}")
+    # no lookahead: a signal at row i must be identical when future rows are removed
+    sig_full, i_sig = None, None
+    for i in range(len(mr_df) - 2, 100, -1):
+        sig_full = evaluate_meanrev(mr_df, mr_htf, i, mr_params, "SYNTH", "5m")
+        if sig_full:
+            i_sig = i
+            break
+    check("meanrev finds a signal in history", sig_full is not None)
+    if sig_full:
+        sig_trunc = evaluate_meanrev(mr_df.iloc[: i_sig + 1], mr_htf, i_sig,
+                                     mr_params, "SYNTH", "5m")
+        check("meanrev no lookahead",
+              sig_trunc is not None and sig_trunc.entry == sig_full.entry
+              and sig_trunc.stop == sig_full.stop,
+              "signal changed when future rows were removed")
+        check("meanrev live path works",
+              latest_meanrev_signal(mr_df.iloc[: i_sig + 1], mr_htf, mr_params,
+                                    "SYNTH", "5m") is not None)
+    print(mr.report())
 
     print("== live signal path ==")
     sig = None

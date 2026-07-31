@@ -22,12 +22,22 @@ from .backtest import grid_search, run_backtest
 from .charting import plot_chart
 from .data import BinanceData, BinanceError
 from .indicators import enrich
+from .meanrev import (MeanRevParams, evaluate_meanrev, grid_search_meanrev,
+                      latest_meanrev_signal)
 from .risk import position_size
-from .strategy import StrategyParams, latest_signal
+from .strategy import StrategyParams, evaluate, latest_signal
 
 
-def _params_from_args(args) -> StrategyParams:
-    return StrategyParams(rr=args.rr, min_score=args.min_score, min_adx=args.min_adx)
+def _strategy_from_args(args):
+    """Returns (params, evaluate_fn, latest_fn, max_hold) for the chosen strategy."""
+    if args.strategy == "meanrev":
+        params = MeanRevParams(tp_atr=args.tp_atr, sl_atr=args.sl_atr,
+                               rsi_long_max=args.rsi_fade,
+                               rsi_short_min=100.0 - args.rsi_fade,
+                               max_hold=args.max_hold or 36)
+        return params, evaluate_meanrev, latest_meanrev_signal, params.max_hold
+    params = StrategyParams(rr=args.rr, min_score=args.min_score, min_adx=args.min_adx)
+    return params, evaluate, latest_signal, args.max_hold or 48
 
 
 def _load(client: BinanceData, symbol: str, interval: str, htf: str, days: float):
@@ -61,10 +71,10 @@ def _context(client: BinanceData, symbol: str) -> dict:
 
 def cmd_analyze(args) -> int:
     client = BinanceData(market=args.market)
-    params = _params_from_args(args)
+    params, _, latest_fn, _ = _strategy_from_args(args)
     df, htf_df = _load(client, args.symbol, args.interval, args.htf, args.days)
     ctx = _context(client, args.symbol)
-    sig = latest_signal(df, htf_df, params, args.symbol, args.interval, ctx)
+    sig = latest_fn(df, htf_df, params, args.symbol, args.interval, ctx)
 
     out_png = os.path.join(args.outdir, f"{args.symbol}_{args.interval}.png")
     os.makedirs(args.outdir, exist_ok=True)
@@ -117,12 +127,12 @@ def _run_ai(payload: dict, df, ctx: dict, chart_png: str, args, wrap: bool = Tru
 
 def cmd_scan(args) -> int:
     client = BinanceData(market=args.market)
-    params = _params_from_args(args)
+    params, _, latest_fn, _ = _strategy_from_args(args)
     hits = 0
     for symbol in args.symbols:
         try:
             df, htf_df = _load(client, symbol, args.interval, args.htf, args.days)
-            sig = latest_signal(df, htf_df, params, symbol, args.interval)
+            sig = latest_fn(df, htf_df, params, symbol, args.interval)
         except BinanceError as exc:
             print(f"  {symbol}: data error — {exc}")
             continue
@@ -141,15 +151,28 @@ def cmd_backtest(args) -> int:
     client = BinanceData(market=args.market)
     df, htf_df = _load(client, args.symbol, args.interval, args.htf, args.days)
     if args.optimize:
-        print(f"Grid search on {args.symbol} {args.interval}, {args.days} days…\n")
-        for p, r in grid_search(df, htf_df, args.symbol, args.interval)[:8]:
-            print(f"  rr={p.rr:<4} min_adx={p.min_adx:<5} min_score={p.min_score} "
-                  f"-> {r.n:>3} trades, {r.win_rate:5.1f}% win, "
-                  f"{r.expectancy_r:+.3f} R/trade, total {sum(t.r_multiple for t in r.trades):+.1f} R")
+        print(f"Grid search on {args.symbol} {args.interval}, {args.days} days "
+              f"({args.strategy})…\n")
+        if args.strategy == "meanrev":
+            rows = grid_search_meanrev(df, htf_df, args.symbol, args.interval,
+                                       fee_pct=args.fee_pct, slippage_bps=args.slippage_bps)
+            for p, r in rows[:10]:
+                print(f"  tp={p.tp_atr:<4} sl={p.sl_atr:<4} rsi={p.rsi_long_max:<4} "
+                      f"(rr {p.rr:.2f}) -> {r.n:>3} trades, {r.win_rate:5.1f}% win, "
+                      f"{r.expectancy_r:+.3f} R/trade, total {sum(t.r_multiple for t in r.trades):+.1f} R")
+            print("\nThe best WIN RATE row and the best EXPECTANCY row usually differ —")
+            print("a 60%+ win rate only matters if the R/trade is also positive.")
+        else:
+            for p, r in grid_search(df, htf_df, args.symbol, args.interval)[:8]:
+                print(f"  rr={p.rr:<4} min_adx={p.min_adx:<5} min_score={p.min_score} "
+                      f"-> {r.n:>3} trades, {r.win_rate:5.1f}% win, "
+                      f"{r.expectancy_r:+.3f} R/trade, total {sum(t.r_multiple for t in r.trades):+.1f} R")
         print("\nPrefer STABLE parameter regions over the single best row (overfitting).")
         return 0
-    params = _params_from_args(args)
-    result = run_backtest(df, htf_df, params, args.symbol, args.interval)
+    params, evaluate_fn, _, max_hold = _strategy_from_args(args)
+    result = run_backtest(df, htf_df, params, args.symbol, args.interval,
+                          evaluate_fn=evaluate_fn, max_hold=max_hold,
+                          fee_pct=args.fee_pct, slippage_bps=args.slippage_bps)
     print(result.report())
     if args.trades and result.trades:
         print("\n  Individual trades:")
@@ -172,6 +195,21 @@ def cmd_chart(args) -> int:
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--strategy", default="pullback", choices=["pullback", "meanrev"],
+                   help="pullback = trend-following 1:2 RR; "
+                        "meanrev = high-win-rate mean reversion (RR < 1)")
+    p.add_argument("--tp-atr", type=float, default=1.2,
+                   help="[meanrev] take-profit distance in ATRs")
+    p.add_argument("--sl-atr", type=float, default=2.0,
+                   help="[meanrev] stop-loss distance in ATRs")
+    p.add_argument("--rsi-fade", type=float, default=32.0,
+                   help="[meanrev] fade when RSI <= this (longs) / >= 100-this (shorts)")
+    p.add_argument("--max-hold", type=int, default=None,
+                   help="time-stop in entry-TF candles (default: 36 meanrev, 48 pullback)")
+    p.add_argument("--fee-pct", type=float, default=0.05,
+                   help="fee per side, %% of notional (0.05 taker, 0.02 maker)")
+    p.add_argument("--slippage-bps", type=float, default=2.0,
+                   help="slippage per side, basis points")
     p.add_argument("--interval", default="5m", help="entry timeframe (default 5m)")
     p.add_argument("--htf", default="15m", help="trend timeframe (default 15m)")
     p.add_argument("--days", type=float, default=3.0, help="history to load")
