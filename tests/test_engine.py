@@ -193,6 +193,15 @@ def main() -> int:
         check("report renders", "WHY" in report and "Stop-loss" in report)
         print(report)
 
+    print("== market structure research ==")
+    from analyst.structure import structure_report
+    rep = structure_report(e, enrich(resample_htf(df, "1h")), "SYNTH", "5m")
+    check("structure report renders all sections",
+          all(s in rep for s in ("WHEN IT MOVES", "LIQUIDITY SWEEPS",
+                                 "BREAKOUT FOLLOW-THROUGH", "AUTOCORRELATION",
+                                 "REGIME SHARE", "PAY FOR ITSELF")))
+    check("structure report has sweep events", "events" in rep)
+
     print("== risk sizing ==")
     s = position_size(500, 1.0, entry=100.0, stop=99.0, max_leverage=10)
     check("sizing math", "5.00" in s["risk per trade"] and "1.0x" in s["leverage needed"], str(s))

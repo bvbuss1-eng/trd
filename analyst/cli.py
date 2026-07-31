@@ -184,6 +184,15 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+def cmd_structure(args) -> int:
+    from .structure import structure_report
+    client = BinanceData(market=args.market)
+    df, htf_df = _load(client, args.symbol, args.interval, args.htf, args.days)
+    print(structure_report(df, htf_df, args.symbol, args.interval,
+                           sweep_lookback=args.sweep_lookback, horizon=args.horizon))
+    return 0
+
+
 def cmd_chart(args) -> int:
     client = BinanceData(market=args.market)
     df = enrich(client.klines_range(args.symbol, args.interval, args.days))
@@ -247,6 +256,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     _add_common(p)
     p.set_defaults(func=cmd_backtest)
+
+    p = sub.add_parser("structure", help="market-structure research report "
+                       "(sessions, sweeps, breakouts, regimes, fee floor)")
+    p.add_argument("symbol")
+    p.add_argument("--sweep-lookback", type=int, default=24,
+                   help="bars defining the prior swing extreme (default 24)")
+    p.add_argument("--horizon", type=int, default=12,
+                   help="bars to measure the outcome after each event (default 12)")
+    _add_common(p)
+    p.set_defaults(func=cmd_structure)
 
     p = sub.add_parser("chart", help="render a chart PNG")
     p.add_argument("symbol")
