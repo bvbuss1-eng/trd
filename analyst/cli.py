@@ -26,10 +26,18 @@ from .meanrev import (MeanRevParams, evaluate_meanrev, grid_search_meanrev,
                       latest_meanrev_signal)
 from .risk import position_size
 from .strategy import StrategyParams, evaluate, latest_signal
+from .sweep import (SweepParams, evaluate_sweep, grid_search_sweep,
+                    latest_sweep_signal)
 
 
 def _strategy_from_args(args):
     """Returns (params, evaluate_fn, latest_fn, max_hold) for the chosen strategy."""
+    if args.strategy == "sweep":
+        params = SweepParams(rr=args.rr, hours=args.hours,
+                             stop_pad_atr=args.stop_pad_atr,
+                             lookback=args.sweep_lookback,
+                             max_hold=args.max_hold or 12)
+        return params, evaluate_sweep, latest_sweep_signal, params.max_hold
     if args.strategy == "meanrev":
         params = MeanRevParams(tp_atr=args.tp_atr, sl_atr=args.sl_atr,
                                rsi_long_max=args.rsi_fade,
@@ -153,7 +161,15 @@ def cmd_backtest(args) -> int:
     if args.optimize:
         print(f"Grid search on {args.symbol} {args.interval}, {args.days} days "
               f"({args.strategy})…\n")
-        if args.strategy == "meanrev":
+        if args.strategy == "sweep":
+            rows = grid_search_sweep(df, htf_df, args.symbol, args.interval,
+                                     fee_pct=args.fee_pct, slippage_bps=args.slippage_bps)
+            for p, r in rows[:12]:
+                print(f"  rr={p.rr:<4} pad={p.stop_pad_atr:<4} hours={p.hours:<8} "
+                      f"-> {r.n:>3} trades, {r.win_rate:5.1f}% win, "
+                      f"{r.expectancy_r:+.3f} R/trade, total {sum(t.r_multiple for t in r.trades):+.1f} R")
+            print("\nWatch the hours column — it tests the session thesis directly.")
+        elif args.strategy == "meanrev":
             rows = grid_search_meanrev(df, htf_df, args.symbol, args.interval,
                                        fee_pct=args.fee_pct, slippage_bps=args.slippage_bps)
             for p, r in rows[:10]:
@@ -204,15 +220,23 @@ def cmd_chart(args) -> int:
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--strategy", default="pullback", choices=["pullback", "meanrev"],
+    p.add_argument("--strategy", default="pullback",
+                   choices=["pullback", "meanrev", "sweep"],
                    help="pullback = trend-following 1:2 RR; "
-                        "meanrev = high-win-rate mean reversion (RR < 1)")
+                        "meanrev = high-win-rate mean reversion (RR < 1); "
+                        "sweep = liquidity-sweep reversal (tight stop, session-filtered)")
     p.add_argument("--tp-atr", type=float, default=1.2,
                    help="[meanrev] take-profit distance in ATRs")
     p.add_argument("--sl-atr", type=float, default=2.0,
                    help="[meanrev] stop-loss distance in ATRs")
     p.add_argument("--rsi-fade", type=float, default=32.0,
                    help="[meanrev] fade when RSI <= this (longs) / >= 100-this (shorts)")
+    p.add_argument("--hours", default="21-7",
+                   help="[sweep] allowed entry hours UTC, e.g. '21-7' or '0-7,21-24'")
+    p.add_argument("--stop-pad-atr", type=float, default=0.3,
+                   help="[sweep] stop distance beyond the sweep wick, in ATRs")
+    p.add_argument("--sweep-lookback", type=int, default=24,
+                   help="bars defining the prior swing extreme (sweep/structure)")
     p.add_argument("--max-hold", type=int, default=None,
                    help="time-stop in entry-TF candles (default: 36 meanrev, 48 pullback)")
     p.add_argument("--fee-pct", type=float, default=0.05,
@@ -260,8 +284,6 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("structure", help="market-structure research report "
                        "(sessions, sweeps, breakouts, regimes, fee floor)")
     p.add_argument("symbol")
-    p.add_argument("--sweep-lookback", type=int, default=24,
-                   help="bars defining the prior swing extreme (default 24)")
     p.add_argument("--horizon", type=int, default=12,
                    help="bars to measure the outcome after each event (default 12)")
     _add_common(p)

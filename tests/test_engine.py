@@ -193,6 +193,45 @@ def main() -> int:
         check("report renders", "WHY" in report and "Stop-loss" in report)
         print(report)
 
+    print("== liquidity-sweep strategy ==")
+    from analyst.sweep import SweepParams, evaluate_sweep, parse_hours
+    check("parse_hours wraps midnight", parse_hours("21-7") ==
+          {21, 22, 23, 0, 1, 2, 3, 4, 5, 6})
+    check("parse_hours plain range", parse_hours("13-21") == set(range(13, 21)))
+    check("parse_hours empty = all", parse_hours("") == set(range(24)))
+    sw_params = SweepParams(hours="0-24", min_pierce_atr=0.05)
+    sw = run_backtest(mr_df, mr_htf, sw_params, "SYNTH", "5m",
+                      evaluate_fn=evaluate_sweep, max_hold=sw_params.max_hold)
+    check("sweep produces trades on ranging data", sw.n >= 5, f"n={sw.n}")
+    if sw.trades:
+        t0 = sw.trades[0]
+        ratio = abs(t0.target - t0.entry) / abs(t0.entry - t0.stop)
+        check("sweep rr geometry", math.isclose(ratio, sw_params.rr, rel_tol=1e-6),
+              f"ratio={ratio:.3f}")
+    # session filter actually filters
+    sw_night = SweepParams(hours="21-7", min_pierce_atr=0.05)
+    night = run_backtest(mr_df, mr_htf, sw_night, "SYNTH", "5m",
+                         evaluate_fn=evaluate_sweep, max_hold=sw_night.max_hold)
+    allowed = parse_hours("21-7")
+    check("sweep session filter respected",
+          all(pd.Timestamp(t.signal_time).hour in allowed for t in night.trades),
+          "trade outside allowed hours")
+    # no lookahead
+    sw_sig, i_sw = None, None
+    for i in range(len(mr_df) - 2, 100, -1):
+        sw_sig = evaluate_sweep(mr_df, mr_htf, i, sw_params, "SYNTH", "5m")
+        if sw_sig:
+            i_sw = i
+            break
+    check("sweep finds a signal in history", sw_sig is not None)
+    if sw_sig:
+        trunc = evaluate_sweep(mr_df.iloc[: i_sw + 1], mr_htf, i_sw,
+                               sw_params, "SYNTH", "5m")
+        check("sweep no lookahead",
+              trunc is not None and trunc.entry == sw_sig.entry
+              and trunc.stop == sw_sig.stop)
+    print(sw.report())
+
     print("== market structure research ==")
     from analyst.structure import structure_report
     rep = structure_report(e, enrich(resample_htf(df, "1h")), "SYNTH", "5m")
