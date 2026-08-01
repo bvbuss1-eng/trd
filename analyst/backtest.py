@@ -151,12 +151,18 @@ def _simulate_exit(df: pd.DataFrame, entry_idx: int, direction: str,
 def run_backtest(df: pd.DataFrame, htf: pd.DataFrame, params,
                  symbol: str, interval: str,
                  fee_pct: float = 0.05, slippage_bps: float = 2.0,
-                 max_hold: int = 48, evaluate_fn=None) -> BacktestResult:
+                 max_hold: int = 48, evaluate_fn=None,
+                 fill_window: int = 3) -> BacktestResult:
     """df/htf must already be indicator-enriched. Fees/slippage per side.
 
     evaluate_fn(df, htf, i, params, symbol, interval) -> Signal | None
-    defaults to the trend-pullback strategy; pass meanrev.evaluate_meanrev
-    (with MeanRevParams) to test the mean-reversion strategy instead.
+    defaults to the trend-pullback strategy.
+
+    Signals with sig.limit set are treated as RESTING LIMIT ORDERS: the
+    order waits up to fill_window bars for price to trade through the limit;
+    no touch = no trade (missed fills are skipped, exactly like live). The
+    fill bar itself is simulated with the usual worst-case ambiguity rule,
+    which slightly over-counts losses when the stop was hit before the fill.
     """
     evaluate_fn = evaluate_fn or evaluate
     result = BacktestResult(params=params, symbol=symbol, interval=interval, candles=len(df))
@@ -167,9 +173,24 @@ def run_backtest(df: pd.DataFrame, htf: pd.DataFrame, params,
         if sig is None:
             i += 1
             continue
-        entry_idx = i + 1                        # fill on next candle open
-        fill = float(df["open"].iloc[entry_idx])
         risk = abs(sig.entry - sig.stop)
+        limit = getattr(sig, "limit", None)
+        if limit is not None:                    # resting limit order
+            entry_idx, fill = None, 0.0
+            for j in range(i + 1, min(len(df) - 1, i + fill_window) + 1):
+                op = float(df["open"].iloc[j])
+                if sig.direction == "SHORT" and float(df["high"].iloc[j]) >= limit:
+                    fill, entry_idx = max(op, limit), j
+                    break
+                if sig.direction == "LONG" and float(df["low"].iloc[j]) <= limit:
+                    fill, entry_idx = min(op, limit), j
+                    break
+            if entry_idx is None:                # never touched: missed trade
+                i += 1
+                continue
+        else:
+            entry_idx = i + 1                    # market: fill on next candle open
+            fill = float(df["open"].iloc[entry_idx])
         # re-anchor stop/target to the actual fill, keeping the same distances;
         # sig.rr allows per-signal geometry (e.g. dynamic VWAP targets)
         if sig.direction == "LONG":

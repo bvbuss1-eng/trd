@@ -27,6 +27,7 @@ class Signal:
     max_score: int
     factors: list[Factor] = field(default_factory=list)
     context: dict = field(default_factory=dict)   # funding, OI, book imbalance...
+    limit: float | None = None    # resting limit entry; None = market/next-open
 
     @property
     def risk_per_unit(self) -> float:

@@ -27,6 +27,8 @@ from .indicators import enrich
 from .meanrev import (MeanRevParams, evaluate_meanrev, grid_search_meanrev,
                       latest_meanrev_signal)
 from .risk import position_size
+from .scalp import (ScalpParams, evaluate_scalp, grid_search_scalp,
+                    latest_scalp_signal)
 from .strategy import StrategyParams, evaluate, latest_signal
 from .sweep import (SweepParams, evaluate_sweep, grid_search_sweep,
                     latest_sweep_signal)
@@ -34,21 +36,30 @@ from .sweep import (SweepParams, evaluate_sweep, grid_search_sweep,
 
 def _strategy_from_args(args):
     """Returns (params, evaluate_fn, latest_fn, max_hold) for the chosen strategy."""
+    if args.strategy == "scalp":
+        params = ScalpParams(hours=args.hours or "13-16",
+                             stretch_atr=args.stretch_atr or 1.5,
+                             sl_atr=args.sl_atr or 0.8, rr=args.rr,
+                             min_atr_bps=args.min_atr_bps,
+                             limit_pad_atr=args.limit_pad_atr,
+                             max_hold=args.max_hold or 24)
+        return params, evaluate_scalp, latest_scalp_signal, params.max_hold
     if args.strategy == "fade":
-        params = FadeParams(stretch_atr=args.stretch_atr, tp_frac=args.tp_frac,
-                            confluence_min=args.confluence_min, hours=args.hours,
+        params = FadeParams(stretch_atr=args.stretch_atr or 2.0, tp_frac=args.tp_frac,
+                            confluence_min=args.confluence_min,
+                            hours=args.hours or "0-24",
                             stop_pad_atr=args.stop_pad_atr,
                             allow_longs=args.allow_longs,
                             max_hold=args.max_hold or 12)
         return params, evaluate_fade, latest_fade_signal, params.max_hold
     if args.strategy == "sweep":
-        params = SweepParams(rr=args.rr, hours=args.hours,
+        params = SweepParams(rr=args.rr, hours=args.hours or "21-7",
                              stop_pad_atr=args.stop_pad_atr,
                              lookback=args.sweep_lookback,
                              max_hold=args.max_hold or 12)
         return params, evaluate_sweep, latest_sweep_signal, params.max_hold
     if args.strategy == "meanrev":
-        params = MeanRevParams(tp_atr=args.tp_atr, sl_atr=args.sl_atr,
+        params = MeanRevParams(tp_atr=args.tp_atr or 1.2, sl_atr=args.sl_atr or 2.0,
                                rsi_long_max=args.rsi_fade,
                                rsi_short_min=100.0 - args.rsi_fade,
                                max_hold=args.max_hold or 36)
@@ -170,7 +181,15 @@ def cmd_backtest(args) -> int:
     if args.optimize:
         print(f"Grid search on {args.symbol} {args.interval}, {args.days} days "
               f"({args.strategy})…\n")
-        if args.strategy == "fade":
+        if args.strategy == "scalp":
+            rows = grid_search_scalp(df, htf_df, args.symbol, args.interval,
+                                     fee_pct=args.fee_pct, slippage_bps=args.slippage_bps)
+            for p, r in rows[:12]:
+                print(f"  stretch={p.stretch_atr:<4} sl={p.sl_atr:<4} hours={p.hours:<8} "
+                      f"-> {r.n:>3} trades, {r.win_rate:5.1f}% win, "
+                      f"{r.expectancy_r:+.3f} R/trade, total {sum(t.r_multiple for t in r.trades):+.1f} R")
+            print("\nRemember: fills are limit-modeled — fewer trades than signals is normal.")
+        elif args.strategy == "fade":
             rows = grid_search_fade(df, htf_df, args.symbol, args.interval,
                                     fee_pct=args.fee_pct, slippage_bps=args.slippage_bps)
             for p, r in rows[:12]:
@@ -246,27 +265,35 @@ def cmd_chart(args) -> int:
 
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--strategy", default="pullback",
-                   choices=["pullback", "meanrev", "sweep", "fade"],
+                   choices=["pullback", "meanrev", "sweep", "fade", "scalp"],
                    help="pullback = trend-following 1:2 RR; "
                         "meanrev = high-win-rate mean reversion (RR < 1); "
                         "sweep = liquidity-sweep reversal (tight stop, session-filtered); "
-                        "fade = VWAP-stretch fade (Pattern Lab composite)")
-    p.add_argument("--stretch-atr", type=float, default=2.0,
-                   help="[fade] setup when |close-VWAP| >= this many ATRs")
+                        "fade = VWAP-stretch fade (Pattern Lab composite); "
+                        "scalp = 5m NY-session limit-entry scalp (1:2 RR)")
+    p.add_argument("--stretch-atr", type=float, default=None,
+                   help="[fade/scalp] setup when |close-VWAP| >= this many ATRs "
+                        "(default: 2.0 fade, 1.5 scalp)")
+    p.add_argument("--min-atr-bps", type=float, default=15.0,
+                   help="[scalp] no trade when ATR below this, in bps")
+    p.add_argument("--limit-pad-atr", type=float, default=0.15,
+                   help="[scalp] rest the limit this far beyond the 3-bar extreme")
     p.add_argument("--tp-frac", type=float, default=0.75,
                    help="[fade] target this fraction of the way back to VWAP")
     p.add_argument("--confluence-min", type=int, default=1,
                    help="[fade] required confluences (sweep/streak/wick, 0-3)")
     p.add_argument("--allow-longs", action="store_true",
                    help="[fade] enable the long side (failed the 90d exam; opt-in)")
-    p.add_argument("--tp-atr", type=float, default=1.2,
-                   help="[meanrev] take-profit distance in ATRs")
-    p.add_argument("--sl-atr", type=float, default=2.0,
-                   help="[meanrev] stop-loss distance in ATRs")
+    p.add_argument("--tp-atr", type=float, default=None,
+                   help="[meanrev] take-profit distance in ATRs (default 1.2)")
+    p.add_argument("--sl-atr", type=float, default=None,
+                   help="[meanrev/scalp] stop-loss distance in ATRs "
+                        "(default: 2.0 meanrev, 0.8 scalp)")
     p.add_argument("--rsi-fade", type=float, default=32.0,
                    help="[meanrev] fade when RSI <= this (longs) / >= 100-this (shorts)")
-    p.add_argument("--hours", default="21-7",
-                   help="[sweep] allowed entry hours UTC, e.g. '21-7' or '0-7,21-24'")
+    p.add_argument("--hours", default=None,
+                   help="allowed entry hours UTC, e.g. '21-7' or '13-16' "
+                        "(default: 21-7 sweep, 0-24 fade, 13-16 scalp)")
     p.add_argument("--stop-pad-atr", type=float, default=0.3,
                    help="[sweep] stop distance beyond the sweep wick, in ATRs")
     p.add_argument("--sweep-lookback", type=int, default=24,

@@ -241,6 +241,78 @@ def main() -> int:
                                  "REGIME SHARE", "PAY FOR ITSELF")))
     check("structure report has sweep events", "events" in rep)
 
+    print("== limit-fill engine ==")
+    from analyst.signal import Signal
+    lidx = pd.date_range("2026-01-01", periods=40, freq="5min", tz="UTC")
+    ldf = pd.DataFrame({
+        "open": [100.0] * 40, "high": [100.5] * 40,
+        "low": [99.5] * 40, "close": [100.0] * 40,
+    }, index=lidx)
+    # bar 31 touches 102 (fills the short limit), bar 33 drops to the target
+    ldf.loc[ldf.index[31], "high"] = 102.5
+    ldf.loc[ldf.index[33], "low"] = 97.5
+
+    def fake_eval_filled(df_, htf_, i, params_, sym, itv):
+        if i == 30:
+            return Signal(symbol=sym, interval=itv, direction="SHORT",
+                          time=str(df_.index[i]), entry=102.0, stop=103.0,
+                          target=100.0, rr=2.0, score=1, max_score=1, limit=102.0)
+        return None
+
+    lr = run_backtest(ldf, ldf, StrategyParams(), "LIM", "5m",
+                      evaluate_fn=fake_eval_filled, max_hold=10)
+    check("limit order fills on touch and wins",
+          lr.n == 1 and lr.trades[0].outcome == "win"
+          and abs(lr.trades[0].entry - 102.0) < 1e-9,
+          f"n={lr.n} {lr.trades[0].outcome if lr.trades else ''}")
+
+    def fake_eval_missed(df_, htf_, i, params_, sym, itv):
+        if i == 20:  # price never reaches 102 within the fill window here
+            return Signal(symbol=sym, interval=itv, direction="SHORT",
+                          time=str(df_.index[i]), entry=102.0, stop=103.0,
+                          target=100.0, rr=2.0, score=1, max_score=1, limit=102.0)
+        return None
+
+    lm = run_backtest(ldf, ldf, StrategyParams(), "LIM", "5m",
+                      evaluate_fn=fake_eval_missed, max_hold=10)
+    check("untouched limit = no trade", lm.n == 0, f"n={lm.n}")
+
+    print("== scalp strategy ==")
+    from analyst.scalp import ScalpParams, evaluate_scalp
+    sc_params = ScalpParams(hours="0-24", min_atr_bps=0.0, stretch_atr=1.0)
+    sc = run_backtest(mr_df, mr_htf, sc_params, "SYNTH", "5m",
+                      evaluate_fn=evaluate_scalp, max_hold=sc_params.max_hold,
+                      fee_pct=0.02, slippage_bps=1.0)
+    check("scalp produces trades", sc.n >= 5, f"n={sc.n}")
+    if sc.trades:
+        t0 = sc.trades[0]
+        ratio = abs(t0.target - t0.entry) / abs(t0.entry - t0.stop)
+        check("scalp 1:2 geometry", math.isclose(ratio, 2.0, rel_tol=1e-6),
+              f"ratio={ratio:.3f}")
+    sc_sess = ScalpParams(hours="13-16", min_atr_bps=0.0, stretch_atr=1.0)
+    ss = run_backtest(mr_df, mr_htf, sc_sess, "SYNTH", "5m",
+                      evaluate_fn=evaluate_scalp, max_hold=24)
+    from analyst.sweep import parse_hours as ph
+    check("scalp session filter respected",
+          all(pd.Timestamp(t.signal_time).hour in ph("13-16") for t in ss.trades),
+          "signal outside session")
+    sc_sig, i_sc = None, None
+    for i in range(len(mr_df) - 2, 100, -1):
+        sc_sig = evaluate_scalp(mr_df, mr_htf, i, sc_params, "SYNTH", "5m")
+        if sc_sig:
+            i_sc = i
+            break
+    check("scalp finds a signal in history", sc_sig is not None)
+    if sc_sig:
+        check("scalp signal carries a limit", sc_sig.limit is not None
+              and abs(sc_sig.limit - sc_sig.entry) < 1e-9)
+        trunc = evaluate_scalp(mr_df.iloc[: i_sc + 1], mr_htf, i_sc,
+                               sc_params, "SYNTH", "5m")
+        check("scalp no lookahead",
+              trunc is not None and trunc.entry == sc_sig.entry
+              and trunc.stop == sc_sig.stop)
+    print(sc.report())
+
     print("== vwap-fade strategy ==")
     from analyst.fade import FadeParams, evaluate_fade
     fd_params = FadeParams(stretch_atr=1.5, allow_longs=True)
